@@ -554,7 +554,7 @@ static int register_l2cc_mutex(bool reg)
 	}
 	paddr = param.a2;
 
-	vaddr = ioremap_cached(paddr, sizeof(u32));
+	vaddr = ioremap_cache(paddr, sizeof(u32));
 	if (vaddr == NULL) {
 		dev_warn(DEV, "TZ l2cc mutex disabled: ioremap failed\n");
 		ret = -ENOMEM;
@@ -620,7 +620,7 @@ static int configure_shm(void)
 	shm_cached = (bool)param.a3;
 
 	if (shm_cached)
-		shm_vaddr = ioremap_cached(shm_paddr, shm_size);
+		shm_vaddr = ioremap_cache(shm_paddr, shm_size);
 	else
 		shm_vaddr = ioremap_nocache(shm_paddr, shm_size);
 
