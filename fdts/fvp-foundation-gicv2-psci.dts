@@ -32,6 +32,8 @@
 
 /memreserve/ 0x81000000 0x00100000;
 /memreserve/ 0x80000000 0x00010000;
+/* Secure frame buffer */
+/memreserve/ 0xff000000 0x00200000;
 
 / {
 };
