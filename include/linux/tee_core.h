@@ -188,6 +188,7 @@ struct tee_ops {
 				  uint32_t flags);
 	void (*free)(struct tee_shm *shm);
 	int (*shm_inc_ref)(struct tee_shm *shm);
+	int (*shm_make_secure)(struct tee_shm *shm, bool secure);
 };
 
 #endif /* __TEE_CORE_DRV_H__ */

@@ -848,6 +848,49 @@ static int tz_shm_inc_ref(struct tee_shm *shm)
 	return tee_shm_pool_incref(tee->dev, ptee->shm_pool, shm->paddr);
 }
 
+static int tz_shm_make_secure(struct tee_shm *shm, bool secure)
+{
+	struct tee *tee;
+	struct tee_tz *ptee;
+	struct teesmc32_arg *arg32;
+	struct teesmc32_param *params32;
+	uintptr_t parg32;
+	int ret = 0;
+
+	if (WARN_ON(!shm->tee) || WARN_ON(!shm->tee) ||
+			WARN_ON(!shm->tee->priv))
+		return -ENOSYS;
+
+	tee = shm->tee;
+	ptee = tee->priv;
+
+	dev_dbg(tee->dev, "%s: shm=%p [paddr=%p size=%zd] secure=%d\n",
+		__func__, shm, (void *)shm->paddr, shm->size_req, secure);
+
+	arg32 = alloc_tee_arg(ptee, &parg32, TEESMC32_GET_ARG_SIZE(1));
+	if (arg32 == NULL) {
+		free_tee_arg(ptee, parg32);
+		return -ENOMEM;
+	}
+	memset(arg32, 0, sizeof(*arg32));
+	arg32->num_params = 1;
+	params32 = TEESMC32_GET_PARAMS(arg32);
+
+	arg32->cmd = TEESMC_CMD_SHM_MAKE_SECURE;
+	params32[0].u.value.a = shm->paddr & 0xFFFFFFFF;
+	params32[0].u.value.b = shm->size_req;
+	params32[0].attr = TEESMC_ATTR_TYPE_VALUE_INPUT;
+
+	call_tee(ptee, parg32, arg32);
+
+	if (arg32->ret == TEEC_ERROR_COMMUNICATION)
+		ret = -EBUSY;
+
+	free_tee_arg(ptee, parg32);
+
+	return ret;
+}
+
 /******************************************************************************/
 /*
 static void tee_get_status(struct tee_tz *ptee)
@@ -1114,6 +1157,7 @@ const struct tee_ops tee_fops = {
 	.alloc = tz_alloc,
 	.free = tz_free,
 	.shm_inc_ref = tz_shm_inc_ref,
+	.shm_make_secure = tz_shm_make_secure
 };
 
 static int tz_tee_init(struct platform_device *pdev)

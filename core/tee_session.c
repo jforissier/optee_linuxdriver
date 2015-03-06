@@ -1,4 +1,3 @@
-
 #include <linux/slab.h>
 #include <linux/device.h>
 #include <linux/types.h>
@@ -494,6 +493,9 @@ static bool tee_session_is_supported_type(struct tee_session *sess, int type)
 
 static int to_memref_type(int flags)
 {
+	/* Secure flag may or may not be set, ignore it */
+	flags &= ~TEEC_MEM_SECURE;
+
 	if (flag_present(flags, TEEC_MEM_INPUT | TEEC_MEM_OUTPUT))
 		return TEEC_MEMREF_TEMP_INOUT;
 
@@ -611,6 +613,8 @@ static int _init_tee_cmd(struct tee_session *sess, struct tee_cmd_io *cmd_io,
 
 			param->params[idx].shm = tee_shm_get(ctx,
 					&param->c_shm[idx], size, offset);
+			dev_dbg(_DEV_TEE, "GLOP c_shm flags = 0x%08x shm flags = 0x%08x",
+				param->c_shm[idx].flags, param->params[idx].shm->flags);
 
 			if (IS_ERR_OR_NULL(param->params[idx].shm)) {
 				if (0) {
@@ -623,6 +627,14 @@ static int _init_tee_cmd(struct tee_session *sess, struct tee_cmd_io *cmd_io,
 				       param->c_shm[idx].buffer + offset, type);
 
 				if (IS_ERR_OR_NULL(param->params[idx].shm))
+					goto out;
+			}
+
+			if (param->c_shm[idx].flags & TEEC_MEM_SECURE) {
+				ret = tee_shm_make_secure(sess,
+							  param->params[idx].shm,
+							  true);
+				if (ret)
 					goto out;
 			}
 
@@ -844,4 +856,14 @@ static void _release_tee_cmd(struct tee_session *sess, struct tee_cmd *cmd)
 out:
 	memset(cmd, 0, sizeof(struct tee_cmd));
 	dev_dbg(_DEV_TEE, "%s: <\n", __func__);
+}
+
+int tee_shm_make_secure(struct tee_session *sess, struct tee_shm *shm,
+			bool secure)
+{
+	struct tee *tee = shm->tee;
+
+	if (!tee->ops->shm_make_secure)
+		return -ENOSYS;
+	return tee->ops->shm_make_secure(shm, secure);
 }
