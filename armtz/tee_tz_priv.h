@@ -42,6 +42,12 @@ struct smc_param {
 };
 #endif
 
+struct optee_call_queue {
+	struct mutex mutex;
+	struct list_head waiters;
+};
+
+
 struct tee_tz {
 	uint32_t sess_id;
 	bool started;
@@ -50,11 +56,10 @@ struct tee_tz {
 	void *shm_vaddr;
 	struct shm_pool *shm_pool;
 	struct mutex mutex;
-	struct completion c;
-	int c_waiters;
 	void *tz_outer_cache_mutex;
 	struct tee_rpc_bf *rpc_buffers;
 	bool shm_cached;
+	struct optee_call_queue call_queue;
 	struct tee_mutex_wait_private mutex_wait;
 	struct tee_wait_queue_private wait_queue;
 };

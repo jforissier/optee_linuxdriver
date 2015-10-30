@@ -65,40 +65,74 @@ static struct handle_db shm_handle_db = HANDLE_DB_INITIALIZER;
  * Calling TEE
  *******************************************************************/
 
-static void e_lock_teez(struct tee_tz *ptee)
+struct optee_call_waiter {
+	struct list_head list_node;
+	struct completion c;
+	bool completed;
+};
+
+static void optee_cq_wait_init(struct optee_call_queue *cq,
+			struct optee_call_waiter *w)
 {
-	mutex_lock(&ptee->mutex);
+	mutex_lock(&cq->mutex);
+	/*
+	 * We add ourselves to the queue, but we don't wait. This
+	 * guarentees that we don't lose a completion if secure world
+	 * returns busy and another thread just exited and try to complete
+	 * someone.
+	 */
+	w->completed = false;
+	init_completion(&w->c);
+	list_add_tail(&w->list_node, &cq->waiters);
+	mutex_unlock(&cq->mutex);
 }
 
-static void e_lock_wait_completion_teez(struct tee_tz *ptee)
+static void optee_cq_wait_for_completion(struct optee_call_queue *cq,
+			struct optee_call_waiter *w)
 {
-	/*
-	 * Release the lock until "something happens" and then reacquire it
-	 * again.
-	 *
-	 * This is needed when TEE returns "busy" and we need to try again
-	 * later.
-	 */
-	ptee->c_waiters++;
-	mutex_unlock(&ptee->mutex);
-	/*
-	 * Wait at most one second. Secure world is normally never busy
-	 * more than that so we should normally never timeout.
-	 */
-	wait_for_completion_timeout(&ptee->c, HZ);
-	mutex_lock(&ptee->mutex);
-	ptee->c_waiters--;
+	wait_for_completion(&w->c);
+
+	mutex_lock(&cq->mutex);
+
+	/* Move to end of list to get out of the way for other waiters */
+	list_del(&w->list_node);
+	w->completed = false;
+	reinit_completion(&w->c);
+	list_add_tail(&w->list_node, &cq->waiters);
+
+	mutex_unlock(&cq->mutex);
 }
 
-static void e_unlock_teez(struct tee_tz *ptee)
+static void optee_cq_complete_one(struct optee_call_queue *cq)
 {
+	struct optee_call_waiter *w;
+
+	list_for_each_entry(w, &cq->waiters, list_node) {
+		if (!w->completed) {
+			complete(&w->c);
+			w->completed = true;
+			break;
+		}
+	}
+}
+
+static void optee_cq_wait_final(struct optee_call_queue *cq,
+			struct optee_call_waiter *w)
+{
+	mutex_lock(&cq->mutex);
+
+	/* Get out of the list */
+	list_del(&w->list_node);
+
+	optee_cq_complete_one(cq);
 	/*
-	 * If at least one thread is waiting for "something to happen" let
-	 * one thread know that "something has happened".
+	 * If we're completed we've got a completion that some other task
+	 * could have used instead.
 	 */
-	if (ptee->c_waiters)
-		complete(&ptee->c);
-	mutex_unlock(&ptee->mutex);
+	if (w->completed)
+		optee_cq_complete_one(cq);
+
+	mutex_unlock(&cq->mutex);
 }
 
 static void handle_rpc_func_cmd_mutex_wait(struct tee_tz *ptee,
@@ -384,51 +418,36 @@ static void call_tee(struct tee_tz *ptee,
 {
 	u32 ret;
 	u32 funcid;
+	struct optee_call_waiter w;
 	struct smc_param param = { 0 };
-
-	if (irqs_disabled())
-		funcid = TEESMC32_FASTCALL_WITH_ARG;
-	else
-		funcid = TEESMC32_CALL_WITH_ARG;
-
-	/*
-	 * Commented out elements used to visualize the layout dynamic part
-	 * of the struct. Note that these fields are not available at all
-	 * if num_params == 0.
-	 *
-	 * params is accessed through the macro TEESMC32_GET_PARAMS
-	 */
-
-	/* struct teesmc32_param params[num_params]; */
-
+	funcid = TEESMC32_CALL_WITH_ARG;
 
 	param.a1 = parg32;
-	e_lock_teez(ptee);
+	/* Initialize waiter */
+	optee_cq_wait_init(&ptee->call_queue, &w);
 	while (true) {
 		param.a0 = funcid;
 
 		tee_smc_call(&param);
 		ret = param.a0;
 
-		if (ret == TEESMC_RETURN_EBUSY) {
+		if (ret == TEESMC_RETURN_ETHREAD_LIMIT) {
 			/*
-			 * Since secure world returned busy, release the
-			 * lock we had when entering this function and wait
-			 * for "something to happen" (something else to
-			 * exit from secure world and needed resources may
-			 * have become available).
+			 * Out of threads in secure world, wait for a thread
+			 * become available.
 			 */
-			e_lock_wait_completion_teez(ptee);
+			optee_cq_wait_for_completion(&ptee->call_queue, &w);
 		} else if (TEESMC_RETURN_IS_RPC(ret)) {
-			/* Process the RPC. */
-			e_unlock_teez(ptee);
 			funcid = handle_rpc(ptee, &param);
-			e_lock_teez(ptee);
 		} else {
 			break;
 		}
 	}
-	e_unlock_teez(ptee);
+	/*
+	 * We're done with our thread in secure world, if there's any
+	 * thread waiters wake up one.
+	 */
+	optee_cq_wait_final(&ptee->call_queue, &w);
 
 	switch (ret) {
 	case TEESMC_RETURN_UNKNOWN_FUNCTION:
@@ -1197,8 +1216,9 @@ static int tz_tee_init(struct platform_device *pdev)
 	ptee->started = false;
 	ptee->sess_id = 0xAB000000;
 	mutex_init(&ptee->mutex);
-	init_completion(&ptee->c);
-	ptee->c_waiters = 0;
+
+	mutex_init(&ptee->call_queue.mutex);
+	INIT_LIST_HEAD(&ptee->call_queue.waiters);
 
 	tee_wait_queue_init(&ptee->wait_queue);
 	ret = tee_mutex_wait_init(&ptee->mutex_wait);
